@@ -1,83 +1,98 @@
 ---
-title: 'Tutorial: Create an Astro Component'
-description: 'Learn how to create your first Astro component.'
+title: 'Zustand5 selector 发生 infinate loops'
+description: '目前看到有关这个问题的博客很少，特此记录一下。
+感谢一下我的mentor们，如此认真地教我，给我充足的时间学习'
 pubDate: 'Jul 02 2022'
 heroImage: '../../assets/images/placeholder-hero.jpg'
-category: 'Category 1'
+category: 'bugs and fixes'
 tags: ['JavaScript', 'css', 'HTML5', 'GitHub']
 ---
 
-**If you know HTML, you already know enough to write your first Astro component.**
+**从Zustand4迁移到Zustand5时，使用选择器方法引入store，出现Maximum update depth exceeded,也就是组件一直重新渲染，改成直接使用store就没有不会出现这个问题**
 
-Astro component syntax is a superset of HTML. The syntax was [designed to feel familiar to anyone with experience writing HTML or JSX](#differences-between-astro-and-jsx), and adds support for including components and JavaScript expressions.
+```js
+// const [xIsNext, setXIsNext] = useGameStore((state) => [
+//   state.xIsNext,
+//   state.setXIsNext,
+// ]);
+// 出现infinate loop
 
-## JSX-like Expressions
-
-You can define local JavaScript variables inside of the frontmatter component script between the two code fences (`---`) of an Astro component. You can then inject these variables into the component's HTML template using JSX-like expressions!
-
-:::note[dynamic vs reactive]
-Using this approach, you can include **dynamic** values that are calculated in the frontmatter. But once included, these values are not **reactive** and will never change. Astro components are templates that only run once, during the rendering step.
-
-See below for more examples of [differences between Astro and JSX](#differences-between-astro-and-jsx).
-:::
-
-### Variables
-
-Local variables can be added into the HTML using the curly braces syntax:
-
-```astro
----
-const name = 'Astro'
----
-
-<div>
-	<h1>Hello {name}!</h1>
-	<!-- Outputs <h1>Hello Astro!</h1> -->
-</div>
+const { history, setHistory, xIsNext, setXIsNext } = useGameStore()
+//没有问题
 ```
 
-### Dynamic Attributes
+## 问题产生原因
 
-Local variables can be used in curly braces to pass attribute values to both HTML elements and components:
+官方文档的解释如下：
+![官网解释](../../assets/images/zustand.png)
 
-```astro title="src/components/DynamicAttributes.astro" "{name}" "${name}"
----
-const name = 'Astro'
----
+[文档链接](https://zustand.docs.pmnd.rs/migrations/migrating-to-v5#requiring-stable-selector-outputs:~:text=There%20is%20a%20behavioral%20change,this%20may%20cause%20infinite%20loops.)
 
-<h1 class={name}>Attribute expressions are supported</h1>
+也就是说，这是因为Zustand v5的改动，当selector返回一个新的引用，可能导致无限循环
 
-<MyComponent templateLiteralNameAttribute={`MyNameIs${name}`} />
+细究了一下，问题产生原因如下：
+
+1. react的默认比较为引用比较，在zustandV5中沿用了这种方式。
+2. 每次重新渲染，useStore都会再执行一次，selector每次都返回的是一个新的引用
+3. zustand使用浅比较判断状态变化，触发重新渲染，以此往复
+
+比如像下面这样使用selector
+
+```js
+  const { history, setHistory} = useGameStore(((state) => ({
+    history: state.history,
+    setHistory: state.setHistory,
+  })));
+  const [searchValue, setSearchValue] = useStore((state)
+          => [  state.searchValue,  state.setSearchValue,])
 ```
 
-:::caution
-HTML attributes will be converted to strings, so it is not possible to pass functions and objects to HTML elements.
-For example, you can't assign an event handler to an HTML element in an Astro component:
+以上两种方法selector分别返回一个对象和一个数组，每次重新渲染，其引用都会发生变化，也就触发了infinate loops
 
-```astro
----
-// dont-do-this.astro
-function handleClick() {
-	console.log('button clicked!')
+## 解决方法
+
+1. 避免在selector中返回对象
+   这是我认为最直接的办法：
+
+```js
+const history = useGameStore((state) => state.history)
+const setHistory = useGameStore((state) => state.setHistory)
+//不要像下面这样
+//  const { history, setHistory} = useGameStore(((state) => ({
+//    history: state.history,
+//    setHistory: state.setHistory,
+//  })));
+```
+
+2. 采用文档中介绍的使用useShllow解决：
+   但是useShllow比较对象只会比较最浅层的值，要注意可能产生的副作用
+
+```js
+const { history, setHistory, xIsNext, setXIsNext } = useGameStore(
+	useShallow((state) => ({
+		history: state.history,
+		setHistory: state.setHistory,
+		xIsNext: state.xIsNext,
+		setXIsNext: state.setXIsNext
+	}))
+)
+```
+
+### 附： zustand实现原理
+
+zustand源代码中useShallow实现部分如下(也就是比较值而非比较引用)：
+
+```js
+import React from 'react'
+import { shallow } from '../vanilla/shallow.ts'
+
+export function useShallow<S, U>(selector: (state: S) => U): (state: S) => U {
+  const prev = React.useRef<U>(undefined)
+  return (state) => {
+    const next = selector(state)
+    return shallow(prev.current, next)
+      ? (prev.current as U)
+      : (prev.current = next)
+  }
 }
----
-
-<!-- ❌ This doesn't work! ❌ -->
-<button onClick={handleClick}>Nothing will happen when you click me!</button>
-```
-
-Instead, use a client-side script to add the event handler, like you would in vanilla JavaScript:
-
-```astro
----
-// do-this-instead.astro
----
-
-<button id='button'>Click Me</button>
-<script>
-	function handleClick() {
-		console.log('button clicked!')
-	}
-	document.getElementById('button').addEventListener('click', handleClick)
-</script>
 ```
